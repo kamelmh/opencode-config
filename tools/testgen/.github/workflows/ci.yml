@@ -1,0 +1,208 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: "1.25.9"
+  MIN_COVERAGE: "15.0"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: Check formatting
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Go files are not formatted. Run 'gofmt -w .'"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # CRITICAL: Clean up stray directories that cause "no required module provides package .out"
+      - name: Clean workspace
+        shell: bash
+        run: rm -rf .out coverage.out || true
+
+      # Use bash shell for cross-platform consistency
+      - name: Run tests with coverage
+        shell: bash
+        run: go test -v -race -covermode=atomic -coverprofile=coverage.out -timeout=5m ./...
+
+      - name: Enforce minimum coverage
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          coverage=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+          if [ -z "$coverage" ]; then
+            echo "Unable to read total coverage from coverage.out"
+            exit 1
+          fi
+          echo "Total coverage: ${coverage}% (minimum: ${MIN_COVERAGE}%)"
+          awk -v cov="$coverage" -v min="${MIN_COVERAGE}" 'BEGIN {
+            if (cov+0 < min+0) {
+              printf "Coverage %.2f%% is below %.2f%%\n", cov, min
+              exit 1
+            }
+          }'
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest' && success()
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Security audit
+        run: govulncheck ./...
+
+  build:
+    name: Build (${{ matrix.goos }}-${{ matrix.goarch }})
+    runs-on: ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, security]
+
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            artifact: testgen-linux-x86_64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            artifact: testgen-linux-aarch64
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            artifact: testgen-macos-x86_64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            artifact: testgen-macos-aarch64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            artifact: testgen-windows-x86_64.exe
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          go build -ldflags="-s -w -X github.com/princepal9120/testgen-cli/cmd.Version=${VERSION}" -o ${{ matrix.artifact }} .
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x ${{ matrix.artifact }}
+          sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-FileHash "${{ matrix.artifact }}" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.artifact }}" |
+          Out-File -Encoding ASCII "${{ matrix.artifact }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            cp "$dir"* release/
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}

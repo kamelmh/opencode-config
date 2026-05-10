@@ -1,0 +1,606 @@
+package tests
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"testing"
+)
+
+var (
+	binaryPath string
+	buildOnce  sync.Once
+	buildErr   error
+)
+
+// getBinaryPath returns the path to the testgen binary
+func getBinaryPath(t *testing.T) string {
+	t.Helper()
+
+	buildOnce.Do(func() {
+		// Get the root directory (parent of tests/)
+		rootDir, err := filepath.Abs("..")
+		if err != nil {
+			buildErr = err
+			return
+		}
+
+		binaryName := "testgen_test_binary"
+		if runtime.GOOS == "windows" {
+			binaryName += ".exe"
+		}
+
+		binaryPath = filepath.Join(rootDir, binaryName)
+
+		// Build the binary
+		buildCmd := exec.Command("go", "build", "-o", binaryName, ".")
+		buildCmd.Dir = rootDir
+		output, err := buildCmd.CombinedOutput()
+		if err != nil {
+			buildErr = err
+			t.Logf("Build output: %s", string(output))
+			return
+		}
+	})
+
+	if buildErr != nil {
+		t.Fatalf("Failed to build binary: %v", buildErr)
+	}
+
+	return binaryPath
+}
+
+// runCmd executes the testgen binary with args and returns stdout, stderr, and error
+func runCmd(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	binary := getBinaryPath(t)
+
+	cmd := exec.Command(binary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+// runCmdInDir executes the testgen binary in a specific directory
+func runCmdInDir(t *testing.T, dir string, args ...string) (string, string, error) {
+	t.Helper()
+	binary := getBinaryPath(t)
+
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+// ============================================
+// HELP AND VERSION TESTS
+// ============================================
+
+func TestHelp(t *testing.T) {
+	stdout, _, err := runCmd(t, "--help")
+	if err != nil {
+		t.Fatalf("Expected success, got error: %v", err)
+	}
+	if !strings.Contains(stdout, "testgen") {
+		t.Errorf("Expected help output to contain 'testgen', got: %s", stdout)
+	}
+	if !strings.Contains(stdout, "generate") {
+		t.Errorf("Expected help output to contain 'generate', got: %s", stdout)
+	}
+}
+
+func TestVersion(t *testing.T) {
+	stdout, _, err := runCmd(t, "--version")
+	if err != nil {
+		t.Fatalf("Expected success, got error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(stdout), "version") {
+		t.Errorf("Expected version output, got: %s", stdout)
+	}
+}
+
+// ============================================
+// GENERATE COMMAND TESTS
+// ============================================
+
+func TestGenerateHelp(t *testing.T) {
+	stdout, _, err := runCmd(t, "generate", "--help")
+	if err != nil {
+		t.Fatalf("Expected success, got error: %v", err)
+	}
+	if !strings.Contains(stdout, "path") {
+		t.Errorf("Expected generate help to contain 'path', got: %s", stdout)
+	}
+	if !strings.Contains(stdout, "type") {
+		t.Errorf("Expected generate help to contain 'type', got: %s", stdout)
+	}
+}
+
+func TestGenerateDryRun(t *testing.T) {
+	// Create temp directory with a sample file
+	dir, err := os.MkdirTemp("", "testgen-e2e-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Create a sample Python file
+	sampleFile := filepath.Join(dir, "sample.py")
+	content := `def add(a, b):
+    return a + b
+
+def subtract(a, b):
+    return a - b
+`
+	if err := os.WriteFile(sampleFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write sample file: %v", err)
+	}
+
+	stdout, stderr, err := runCmdInDir(t, dir, "generate", "--file=sample.py", "--dry-run")
+	// With dry-run, it should succeed (may show API key error but command should parse)
+	_ = err // May fail due to missing API key, but command should be valid
+	combined := stdout + stderr
+	if !strings.Contains(combined, "sample.py") && !strings.Contains(combined, "API") && !strings.Contains(combined, "dry") {
+		t.Logf("Output: %s", combined)
+	}
+}
+
+func TestGenerateDryRunJSONOutput(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-json-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	sampleFile := filepath.Join(dir, "sample.py")
+	content := `# intentionally no function definitions
+VALUE = 1
+`
+	if err := os.WriteFile(sampleFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write sample file: %v", err)
+	}
+
+	stdout, stderr, err := runCmdInDir(t, dir, "generate", "--file=sample.py", "--dry-run", "--emit-patch", "--report-usage", "--output-format=json")
+	if err != nil {
+		t.Fatalf("Expected JSON dry-run to succeed, got error: %v stderr=%s", err, stderr)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("Expected valid JSON output, got error: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	if _, ok := payload["results"]; !ok {
+		t.Fatalf("Expected JSON payload to contain results, got: %s", stdout)
+	}
+	usage, ok := payload["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected JSON payload to contain usage block, got: %s", stdout)
+	}
+	if usage["provider"] == "" {
+		t.Fatalf("expected usage provider, got: %v", usage)
+	}
+}
+
+func TestGenerateDryRunJSONUsageOutput(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-json-usage-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	sampleFile := filepath.Join(dir, "sample.py")
+	content := `# intentionally no function definitions
+VALUE = 1
+`
+	if err := os.WriteFile(sampleFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("Failed to write sample file: %v", err)
+	}
+
+	stdout, stderr, err := runCmdInDir(t, dir, "generate", "--file=sample.py", "--dry-run", "--report-usage", "--output-format=json")
+	if err != nil {
+		t.Fatalf("Expected JSON dry-run usage mode to succeed, got error: %v stderr=%s", err, stderr)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("Expected valid JSON output, got error: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	usage, ok := payload["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected JSON payload to contain usage block, got: %s", stdout)
+	}
+	if usage["provider"] == "" || usage["model"] == "" {
+		t.Fatalf("Expected provider/model metadata in usage block, got: %v", usage)
+	}
+}
+
+func TestGenerateRequestFileImplicitMachineMode(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-request-file-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	sampleFile := filepath.Join(dir, "sample.py")
+	content := `def add(a, b):
+    return a + b
+`
+	if err := os.WriteFile(sampleFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write sample file: %v", err)
+	}
+
+	requestFile := filepath.Join(dir, "request.json")
+	request := `{"api_version":"v1","request_id":"req_integration_machine","file":"sample.py","test_types":["unit"],"dry_run":true,"provider":"anthropic"}`
+	if err := os.WriteFile(requestFile, []byte(request), 0644); err != nil {
+		t.Fatalf("Failed to write request file: %v", err)
+	}
+
+	stdout, stderr, err := runCmdInDir(t, dir, "generate", "--request-file=request.json")
+	if err == nil {
+		t.Fatalf("Expected request-file machine mode without API key to fail")
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("Expected valid JSON output, got error: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if payload["failure_code"] != "missing_api_key" {
+		t.Fatalf("Expected missing_api_key failure code, got: %v", payload["failure_code"])
+	}
+	if strings.Contains(stderr, "Usage:") || strings.Contains(stderr, "Error:") {
+		t.Fatalf("Expected machine mode to suppress Cobra error banners, stderr=%s", stderr)
+	}
+}
+
+func TestGenerateNoFile(t *testing.T) {
+	_, stderr, err := runCmd(t, "generate")
+	if err == nil {
+		t.Log("generate without file might succeed with default behavior")
+	}
+	// Check that it either fails or has reasonable output
+	_ = stderr
+}
+
+// ============================================
+// ANALYZE COMMAND TESTS
+// ============================================
+
+func TestAnalyzeHelp(t *testing.T) {
+	stdout, _, err := runCmd(t, "analyze", "--help")
+	if err != nil {
+		t.Fatalf("Expected success, got error: %v", err)
+	}
+	if !strings.Contains(stdout, "path") {
+		t.Errorf("Expected analyze help to contain 'path', got: %s", stdout)
+	}
+	if !strings.Contains(stdout, "cost") {
+		t.Errorf("Expected analyze help to contain 'cost', got: %s", stdout)
+	}
+}
+
+func TestAnalyzeWithSampleFiles(t *testing.T) {
+	// Create temp directory with sample files
+	dir, err := os.MkdirTemp("", "testgen-analyze-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Create sample files
+	files := map[string]string{
+		"main.py": `def main():
+    print("Hello")
+
+def helper():
+    return 42
+`,
+		"utils.js": `function add(a, b) {
+    return a + b;
+}
+
+function multiply(a, b) {
+    return a * b;
+}
+`,
+	}
+
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to write %s: %v", name, err)
+		}
+	}
+
+	stdout, stderr, err := runCmdInDir(t, dir, "analyze", "--path=.", "--cost-estimate")
+	if err != nil {
+		t.Logf("Analyze command failed (may be expected): %v", err)
+	}
+	combined := stdout + stderr
+	// Should show some analysis output
+	if strings.Contains(combined, "error") && !strings.Contains(combined, "file") {
+		t.Logf("Output: %s", combined)
+	}
+}
+
+func TestAnalyzeJSONIncludesProviderAwareCostFields(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-analyze-json-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	if err := os.WriteFile(filepath.Join(dir, "main.py"), []byte("def main():\n    return 42\n"), 0o644); err != nil {
+		t.Fatalf("write python file: %v", err)
+	}
+
+	stdout, stderr, err := runCmdInDir(t, dir, "analyze", "--path=.", "--cost-estimate", "--detail=per-file", "--output-format=json")
+	if err != nil {
+		t.Fatalf("Expected analyze json to succeed, got error: %v stderr=%s", err, stderr)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("Expected valid JSON output, got error: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	usage, ok := payload["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected usage block in analyze output, got: %s", stdout)
+	}
+	if usage["provider"] == "" {
+		t.Fatalf("expected analyze usage provider, got: %v", usage)
+	}
+	files, ok := payload["files"].([]interface{})
+	if !ok || len(files) == 0 {
+		t.Fatalf("expected per-file entries in analyze output, got: %s", stdout)
+	}
+	firstFile, ok := files[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected first file object, got: %#v", files[0])
+	}
+	if _, ok := firstFile["estimated_cost_usd"]; !ok {
+		t.Fatalf("expected per-file estimated_cost_usd, got: %#v", firstFile)
+	}
+}
+
+// ============================================
+// VALIDATE COMMAND TESTS
+// ============================================
+
+func TestValidateHelp(t *testing.T) {
+	stdout, _, err := runCmd(t, "validate", "--help")
+	if err != nil {
+		t.Fatalf("Expected success, got error: %v", err)
+	}
+	if !strings.Contains(stdout, "path") {
+		t.Errorf("Expected validate help to contain 'path', got: %s", stdout)
+	}
+}
+
+func TestValidateJSONFailureEnvelope(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-validate-json-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	srcDir := filepath.Join(dir, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("Failed to create src dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "sample.py"), []byte("def add(a, b):\n    return a + b\n"), 0o644); err != nil {
+		t.Fatalf("Failed to write sample file: %v", err)
+	}
+
+	stdout, stderr, err := runCmdInDir(t, dir, "validate", "--path=src", "--fail-on-missing-tests", "--output-format=json")
+	if err == nil {
+		t.Fatal("expected validation failure exit")
+	}
+	if strings.Contains(stderr, "Usage:") {
+		t.Fatalf("expected machine-mode validate to suppress usage output, got stderr=%s", stderr)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("Expected valid JSON output, got error: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if payload["api_version"] != "v1" {
+		t.Fatalf("expected api_version v1, got %#v", payload["api_version"])
+	}
+	if payload["success"] != false {
+		t.Fatalf("expected success=false, got %#v", payload["success"])
+	}
+	if payload["failure_code"] != "validation_failed" {
+		t.Fatalf("expected validation_failed, got %#v", payload["failure_code"])
+	}
+	if _, ok := payload["result"]; !ok {
+		t.Fatalf("expected outer validation response envelope, got %s", stdout)
+	}
+}
+
+// ============================================
+// TUI COMMAND TESTS
+// ============================================
+
+func TestTuiHelp(t *testing.T) {
+	stdout, _, err := runCmd(t, "tui", "--help")
+	if err != nil {
+		t.Fatalf("Expected success, got error: %v", err)
+	}
+	if !strings.Contains(stdout, "TUI") && !strings.Contains(stdout, "tui") && !strings.Contains(stdout, "interactive") {
+		t.Errorf("Expected TUI help output, got: %s", stdout)
+	}
+}
+
+// ============================================
+// INVALID COMMANDS TESTS
+// ============================================
+
+func TestInvalidCommand(t *testing.T) {
+	_, stderr, err := runCmd(t, "nonexistent-command")
+	if err == nil {
+		t.Error("Expected error for invalid command")
+	}
+	if !strings.Contains(stderr, "unknown") && !strings.Contains(stderr, "Error") && !strings.Contains(stderr, "invalid") {
+		t.Logf("Stderr: %s", stderr)
+	}
+}
+
+func TestInvalidFlag(t *testing.T) {
+	_, stderr, err := runCmd(t, "generate", "--invalid-flag-xyz")
+	if err == nil {
+		t.Error("Expected error for invalid flag")
+	}
+	if !strings.Contains(stderr, "unknown") && !strings.Contains(stderr, "flag") {
+		t.Logf("Stderr: %s", stderr)
+	}
+}
+
+// ============================================
+// FILE TYPE DETECTION TESTS
+// ============================================
+
+func TestPythonFileDetection(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-python-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Create Python file
+	pyFile := filepath.Join(dir, "calculator.py")
+	content := `def add(a: int, b: int) -> int:
+    """Add two numbers."""
+    return a + b
+
+class Calculator:
+    def multiply(self, a, b):
+        return a * b
+`
+	if err := os.WriteFile(pyFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write file: %v", err)
+	}
+
+	stdout, stderr, _ := runCmdInDir(t, dir, "analyze", "--path=.")
+	combined := stdout + stderr
+	// Should detect Python
+	if !strings.Contains(combined, "py") && !strings.Contains(combined, "Python") && !strings.Contains(combined, "file") {
+		t.Logf("Output: %s", combined)
+	}
+}
+
+func TestJavaScriptFileDetection(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-js-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Create JavaScript file
+	jsFile := filepath.Join(dir, "utils.js")
+	content := `function add(a, b) {
+    return a + b;
+}
+
+const subtract = (a, b) => a - b;
+
+export { add, subtract };
+`
+	if err := os.WriteFile(jsFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write file: %v", err)
+	}
+
+	stdout, stderr, _ := runCmdInDir(t, dir, "analyze", "--path=.")
+	combined := stdout + stderr
+	// Should detect JavaScript
+	if !strings.Contains(combined, "js") && !strings.Contains(combined, "JavaScript") && !strings.Contains(combined, "file") {
+		t.Logf("Output: %s", combined)
+	}
+}
+
+func TestGoFileDetection(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-go-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Create Go file
+	goFile := filepath.Join(dir, "main.go")
+	content := `package main
+
+func Add(a, b int) int {
+    return a + b
+}
+
+type Calculator struct{}
+
+func (c *Calculator) Multiply(a, b int) int {
+    return a * b
+}
+`
+	if err := os.WriteFile(goFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write file: %v", err)
+	}
+
+	stdout, stderr, _ := runCmdInDir(t, dir, "analyze", "--path=.")
+	combined := stdout + stderr
+	// Should detect Go
+	if !strings.Contains(combined, "go") && !strings.Contains(combined, "Go") && !strings.Contains(combined, "file") {
+		t.Logf("Output: %s", combined)
+	}
+}
+
+func TestRustFileDetection(t *testing.T) {
+	dir, err := os.MkdirTemp("", "testgen-rust-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Create Rust file
+	rsFile := filepath.Join(dir, "lib.rs")
+	content := `pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+impl Calculator {
+    pub fn multiply(&self, a: i32, b: i32) -> i32 {
+        a * b
+    }
+}
+`
+	if err := os.WriteFile(rsFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write file: %v", err)
+	}
+
+	stdout, stderr, _ := runCmdInDir(t, dir, "analyze", "--path=.")
+	combined := stdout + stderr
+	// Should detect Rust
+	if !strings.Contains(combined, "rs") && !strings.Contains(combined, "Rust") && !strings.Contains(combined, "file") {
+		t.Logf("Output: %s", combined)
+	}
+}
+
+// ============================================
+// CLEANUP
+// ============================================
+
+func TestCleanup(t *testing.T) {
+	// Clean up the test binary using the global path
+	if binaryPath != "" {
+		os.Remove(binaryPath)
+	}
+}
