@@ -1,0 +1,65 @@
+{
+  "version": "2.0.1",
+  "last_updated": "2026-05-08T12:00:00",
+  "session_goal": "Academix v13.2 — Thesis Defense Readiness & VBA Verification",
+  "active_workspace": "Logistics Public Sector Refactor",
+  "memory_protocol": {
+    "auto_recall_enabled": true,
+    "pre_compaction_hook": "dump_to_notepad_md",
+    "session_start_files": [
+      "C:\\Users\\Administrator\\.opencode\\notepad.md",
+      "C:\\Users\\Administrator\\.opencode\\project-memory.json",
+      "C:\\Users\\Administrator\\Dropbox\\Logistics.Public.Sector.Refactor\\CLAUDE.md",
+      "C:\\Users\\Administrator\\.config\\opencode\\opencode.json",
+      "C:\\Users\\Administrator\\Dropbox\\Logistics.Public.Sector.Refactor\\Software_Surgical_Edit\\erp-project-context.xml",
+      "C:\\Users\\Administrator\\.config\\opencode\\AGENTS.md"
+    ],
+    "checkpoint_dir": "C:\\Users\\Administrator\\.omc\\state\\sessions",
+    "memory_skill": "memory-manager v2.0"
+  },
+  "repositories": [
+    {"name": "logistics-public-sector-refactor", "root": "C:\\Users\\Administrator\\Dropbox\\Logistics.Public.Sector.Refactor", "priority": "CRITICAL", "purpose": "MAIN THESIS: CNEPD Compliant VBA System", "github": "https://github.com/kamelmh/logistics-public-sector-refactor", "status": "VBA built (38 components, 10,130+ lines, 0 compile errors), 25 sheets, PDF thesis 843 KB"},
+    {"name": "omc", "root": "C:\\Users\\Administrator\\omc", "priority": "CRITICAL", "purpose": "Oh-My-ClaudeCode (Multi-Agent Layer)", "github": "https://github.com/kamelmh/omc", "status": "v4.9.3 integrated"},
+    {"name": "opencode", "root": "C:\\Users\\Administrator\\opencode", "priority": "CRITICAL", "purpose": "OpenCode fork/customization", "github": "https://github.com/kamelmh/opencode", "status": "60+ skills loaded"}
+  ],
+  "cnepd_constants": {
+    "D": 1546,
+    "ROP": 205.6,
+    "SS": 200,
+    "QSTAR": 176,
+    "LT": 2,
+    "S": 500,
+    "I": "20%",
+    "ART-001": "Toner G030 (Case Study)",
+    "version": "v13.2",
+    "observation_days": 38,
+    "working_days": 250,
+    "forbidden_terms": ["Database", "Python", "Flask", "JSON", "Academix", "فرع"],
+    "replacements": {
+      "Database": "السجل الرقمي",
+      "Python": "وحدات المعالجة VBA",
+      "Hybrid System": "نظام إلكتروني متكامل"
+    }
+  },
+  "active_project": {
+    "name": "Academix v13.2 — Logistics Public Sector Refactor",
+    "status": "THESIS COMPLETE — All 4 chapters done. VBA workbook verified (0 compile errors). PDF generated (843 KB, 0 warnings). Defense QA guide ready.",
+    "next_step": "Defense preparation — practice jury Q&A from DEFENSE_QA_GUIDE.md",
+    "deliverables": {
+      "workbook": "C:\\Users\\Administrator\\Dropbox\\ERP_v13.2.xlsm (245 KB)",
+      "thesis_pdf": "Software_Surgical_Edit/ERP_Academie_v13.2_FIXED.xlsm (master source)",
+      "vba_source_modules": 29,
+      "vba_total_components": 38,
+      "vba_total_lines": 10130,
+      "compile_errors": 0,
+      "sheets": 25,
+      "commits": 31
+    }
+  },
+  "memory_health": {
+    "last_checkpoint": "2026-05-08T12:00:00",
+    "notepad_md_age_minutes": 0,
+    "project_memory_json_age_minutes": 0,
+    "auto_recovery_tested": false
+  }
+}
